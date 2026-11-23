@@ -49,6 +49,50 @@ export function versionUnknown(error: unknown): boolean {
  */
 export const VERSION_AGAIN_MS = 60 * 60_000;
 
+/**
+ * The argument the plugin adds to each Artwork call its session makes on the plugin's own server,
+ * the model's and the waker's: the session, `claude-code:<session id>`. Claude Code names its
+ * session to no MCP server, and a reconnect or a resume opens a new MCP session, so this is how
+ * the server knows the session across its connections, to keep its name in the document and its
+ * threads' replies coming to it (ART-3316, ART-3303). `SESSION_ARGUMENT` in
+ * `apps/agent/src/tool-input.ts` is the same; no tool lists it, so the model never gives it.
+ */
+export const SESSION_ARGUMENT = "_session";
+
+/** The value of `SESSION_ARGUMENT` for Claude Code session `id`. */
+export function sessionArgumentOf(id: string): string {
+  return `claude-code:${id}`;
+}
+
+// COMPAT(sessionless-server): added in 2026-11-22, remove after 2027-01-31, by when every local server has run a build that takes _session
+/**
+ * Whether a call was refused because its server doesn't take `SESSION_ARGUMENT`, as a server from
+ * before it refuses an argument it doesn't name, alone or beside another. The plugin then calls
+ * again at once without it, and names it again `SESSION_AGAIN_MS` later. Such a call changed
+ * nothing, so calling it again is safe.
+ */
+export function sessionUnknown(error: unknown): boolean {
+  return /doesn't take the arguments? (?:[\w.[\]]+, )*_session\b/.test(String(error));
+}
+
+/** How long after a server refused `SESSION_ARGUMENT` the plugin names the session again. */
+export const SESSION_AGAIN_MS = 60 * 60_000;
+
+/**
+ * Whether the plugin names its session on call `tool`: an Artwork tool of its own server, which
+ * `own` spells as `toolPrefixOf` does, once known, and no longer than `until` refused it. The
+ * server is matched whole, so one whose name only starts with the plugin's never hears it.
+ */
+export function namesSession(
+  tool: string,
+  own: string | null,
+  now: number,
+  until: number,
+): boolean {
+  if (own === null || now < until || !tool.startsWith(`mcp__${own}__`)) return false;
+  return /^artwork_[a-z]+(?:_[a-z]+)*$/.test(tool.slice(`mcp__${own}__`.length));
+}
+
 /** The most documents one session wakes from; the oldest named goes first past it. */
 export const MOST_DOCUMENTS = 20;
 

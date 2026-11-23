@@ -44,6 +44,7 @@ import {
   type Kept,
   keptOf,
   MANIFEST,
+  namesSession,
   OFF_LEAST_MS,
   OFF_PAUSE_MS,
   otherArtworkServers,
@@ -53,7 +54,11 @@ import {
   refusal,
   relayOff,
   relayRefused,
+  SESSION_AGAIN_MS,
+  SESSION_ARGUMENT,
   secondServerNotice,
+  sessionArgumentOf,
+  sessionUnknown,
   standingAsideRefusal,
   toolPrefixOf,
   VERSION_AGAIN_MS,
@@ -118,9 +123,20 @@ interface On {
 /** The store key the documents of each session are kept under. */
 const SESSIONS = "sessions";
 
-/** The documents of every session, as kept, and this session's id. */
+/**
+ * The documents of every session, as kept, and this session's id: the one Claude Code started the
+ * process with, which the waker follows and every call to the plugin's own server names
+ * (`SESSION_ARGUMENT`), so the model's calls and the waker's meet in one conversation.
+ */
 let kept: Kept = {};
 let session: string | null = null;
+/**
+ * Whether Claude Code has moved the process to another session (`/clear`, or `/resume` inside
+ * it): from then on no call names a session, so the chat goes by its connection, as without the
+ * plugin, rather than by a session it left, whose name and threads a later `claude --resume` of
+ * that session would then share with it.
+ */
+let moved = false;
 /** Documents named since the waker started, for it to begin waiting in. */
 const named: string[] = [];
 /** The documents the waker waits in now, by id. */
@@ -148,6 +164,15 @@ const calls = new Map<string, number>();
  */
 let own = "";
 let ownKnown = false;
+/**
+ * The plugin's own server as Claude Code names its tools when it runs the plugin's (`.mcp.json`'s
+ * `artwork` in the plugin `artwork`, which `$.mcp.connect` answers as `plugin:artwork:artwork`):
+ * the server a call names its session to until the plugin has learned its own, so a session's
+ * first calls, before then or before the person signs in, are named as its later ones are.
+ */
+const PLUGIN_SERVER = toolPrefixOf("plugin:artwork:artwork");
+/** Until when, on the host's clock, calls don't name the session: its server refused it then. */
+let sessionlessUntil = 0;
 /** The session's tools as last listed, judged once the plugin's own server is known. */
 let listedTools: readonly string[] = [];
 /** The other Artwork servers the session's tools show, while there are any: the waker stands aside. */
@@ -198,6 +223,25 @@ function sawTools($: Host, names: readonly string[]): void {
   }
 }
 
+/**
+ * The session an Artwork call `tool` names (`namesSession`), or null for none: a call to the
+ * plugin's own server, once known, else to the one Claude Code runs for the plugin
+ * (`PLUGIN_SERVER`).
+ */
+async function namingFor($: Host, tool: string): Promise<string | null> {
+  const now = await $.clock.now().catch(() => Date.now());
+  if (!namesSession(tool, ownKnown ? own : PLUGIN_SERVER, now, sessionlessUntil)) return null;
+  return (await namesStarted($)) ? session : null;
+}
+
+/** Whether calls may still name `session`: Claude Code hasn't moved the process off it (`moved`). */
+async function namesStarted($: Host): Promise<boolean> {
+  if (session === null || moved) return false;
+  const now = await $.session.id().catch(() => session);
+  if (now !== session) moved = true;
+  return !moved;
+}
+
 /** Has the waker wait in `document`, unless it waits there already. */
 function follow(document: string): void {
   // Standing aside, the waker takes the session's kept documents up again when it may.
@@ -239,10 +283,13 @@ export function register(on: On): void {
     // was updated meanwhile.
     let unversionedUntil = 0;
     // Named on each relay call, so the server can answer this plugin by its version.
-    const relayArgs = (document: string, now: number) => ({
+    const relayArgs = (document: string, now: number, naming: boolean) => ({
       document,
       timeout_seconds: HOLD_SECONDS,
       ...(version === undefined || now < unversionedUntil ? {} : { plugin_version: version }),
+      ...(!naming || session === null || now < sessionlessUntil
+        ? {}
+        : { [SESSION_ARGUMENT]: sessionArgumentOf(session) }),
     });
 
     /**
@@ -289,12 +336,13 @@ export function register(on: On): void {
         // The session's calls here so far, so a pause sees one made while this call ran.
         const called = calls.get(id) ?? 0;
         if (logPath) await $.fs.write(logPath, logLine("relay-call")).catch(() => undefined);
+        const naming = await namesStarted($);
         // Read after the write, so an hour that ran out meanwhile names the version again.
         const now = await $.clock.now().catch(() => Date.now());
         // A second server may have shown up during the write: checked again with nothing between.
         if (others.length > 0) break;
         // Built here, so a refusal another document's call met during the write counts.
-        const args = relayArgs(document, now);
+        const args = relayArgs(document, now, naming);
         relaying += 1;
         const place = relayIn.get(idOf(document)) ?? { running: 0, ended: 0 };
         relayIn.set(idOf(document), place);
@@ -312,6 +360,12 @@ export function register(on: On): void {
         }
         if (answer.isError) {
           const why = "failed" in answer ? String(answer.failed) : JSON.stringify(answer.content);
+          // COMPAT(sessionless-server): added in 2026-11-22, remove after 2027-01-31. A server that
+          // doesn't take the session is asked again at once without it.
+          if (sessionUnknown(why)) {
+            sessionlessUntil = place.ended + SESSION_AGAIN_MS;
+            continue;
+          }
           // COMPAT(relay-unversioned-server): added in 2026-11-19, remove after 2027-01-31. A server
           // that doesn't take the version is asked again at once without it, as is a call that
           // went out with it before another document's refusal.
@@ -344,6 +398,10 @@ export function register(on: On): void {
           continue;
         }
         failures = 0;
+        // A call that named the session, answered once the process has left it, hands nothing to
+        // the chat that replaced it: a comment's wake stays unread for that session's next resume,
+        // while a decision's answer, recorded with this answer, waits only in its desk, an hour.
+        if (naming && !(await namesStarted($))) continue;
         const wakes = wakesOf(answer);
         if (logPath)
           await $.fs
@@ -430,7 +488,18 @@ export function register(on: On): void {
       if (held <= 0) break;
       await $.clock.sleep(held);
     }
-    const result = await next(e);
+    // Each call to the plugin's own server names the session (`SESSION_ARGUMENT`), so a new
+    // connection of it, after `/mcp` or a resume, keeps its name and threads.
+    const naming = artworkToolOf(e.tool) === null ? null : await namingFor($, e.tool);
+    let result = await next(
+      naming === null ? e : { ...e, [SESSION_ARGUMENT]: sessionArgumentOf(naming) },
+    );
+    // COMPAT(sessionless-server): added in 2026-11-22, remove after 2027-01-31. Refused, the call
+    // changed nothing: it goes again without the session.
+    if (naming !== null && result.isError && sessionUnknown(result.text)) {
+      sessionlessUntil = (await $.clock.now().catch(() => Date.now())) + SESSION_AGAIN_MS;
+      result = await next(e);
+    }
     // Only a call the server answered names a document: one it refused may be on another server.
     if (artworkToolOf(e.tool) === null || result.deny !== undefined || result.isError) {
       return result;
@@ -439,8 +508,10 @@ export function register(on: On): void {
     if (logPath) await $.fs.write(logPath, logLine("artwork-call", e.tool)).catch(() => undefined);
     if (document === null || session === null) return result;
     kept = withDocument(kept, session, document, Date.now());
-    // A store that refuses keeps nothing for a resume; this session still wakes.
-    await $.store.set(SESSIONS, kept).catch(() => undefined);
+    // A store that refuses keeps nothing for a resume; this session still wakes. Once the process
+    // has left the session it started as (`moved`), its documents are kept for this process alone,
+    // so a later resume of that session never wakes in a chat's it didn't work in.
+    if (await namesStarted($)) await $.store.set(SESSIONS, kept).catch(() => undefined);
     follow(document);
     return result;
   });
