@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "artwork": {
+      "type": "http",
+      "url": "${ARTWORK_MCP_URL:-https://artwork.md/mcp}"
+    }
+  }
+}

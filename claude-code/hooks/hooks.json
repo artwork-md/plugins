@@ -1,0 +1,5 @@
+{
+  "description": "Wakes the session when a comment lands for it in an Artwork document",
+  "modules": ["./register.ts"],
+  "hooks": {}
+}

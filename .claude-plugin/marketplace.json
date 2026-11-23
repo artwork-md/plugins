@@ -1,0 +1,15 @@
+{
+  "name": "artwork",
+  "description": "Artwork's plugin for Claude Code",
+  "owner": {
+    "name": "Artwork",
+    "url": "https://artwork.md"
+  },
+  "plugins": [
+    {
+      "name": "artwork",
+      "source": "./claude-code",
+      "description": "Artwork's tools for Claude Code, and comments that wake your running session"
+    }
+  ]
+}

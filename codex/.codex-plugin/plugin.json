@@ -1,0 +1,16 @@
+{
+  "name": "artwork",
+  "version": "0.1.1",
+  "description": "While Codex is running, a comment for your Codex agent in an Artwork document starts its reply in your thread, without you sending a message.",
+  "author": { "name": "Artwork", "url": "https://artwork.md" },
+  "homepage": "https://artwork.md",
+  "license": "MIT",
+  "hooks": "./hooks.json",
+  "interface": {
+    "displayName": "Artwork",
+    "shortDescription": "Comments in Artwork wake your Codex thread while Codex is running",
+    "developerName": "Artwork",
+    "category": "Productivity",
+    "websiteURL": "https://artwork.md"
+  }
+}

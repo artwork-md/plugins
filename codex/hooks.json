@@ -1,0 +1,32 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "^mcp__.+__artwork_[a-z_]+$",
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 5,
+            "command": "node \"$PLUGIN_ROOT/waker/hook.mjs\"",
+            "statusMessage": "Artwork: listen for comments"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "^mcp__.+__artwork_relay$",
+        "hooks": [
+          { "type": "command", "timeout": 5, "command": "node \"$PLUGIN_ROOT/waker/hook.mjs\"" }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "timeout": 5, "command": "node \"$PLUGIN_ROOT/waker/hook.mjs\"" }
+        ]
+      }
+    ]
+  }
+}
