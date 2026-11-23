@@ -44,6 +44,7 @@ import {
   type Kept,
   keptOf,
   MANIFEST,
+  mergedKept,
   namesSession,
   OFF_LEAST_MS,
   OFF_PAUSE_MS,
@@ -70,7 +71,7 @@ import {
   withHanded,
 } from "./waker.ts";
 
-/** The part of Claude Code's hooks API (2.1.327) this module uses. */
+/** The part of Claude Code's hooks API (2.1.330) this module uses. */
 interface McpAnswer {
   content?: { type?: string; text?: string }[];
   structuredContent?: unknown;
@@ -100,6 +101,11 @@ type Next<E, R> = (event: E) => Promise<R>;
 type Hook<E, R> = ($: Host, e: E, next: Next<E, R>) => Promise<R>;
 interface On {
   (event: "session.start", hook: Hook<unknown, unknown>): void;
+  (event: "session.end", hook: Hook<{ reason?: string; sessionId?: string }, unknown>): void;
+  (
+    event: "classic.SessionStart",
+    hook: Hook<{ source?: string; session_id?: string }, unknown>,
+  ): void;
   (event: "tool.list", hook: Hook<unknown, Listed>): void;
   (
     event: "tool.call",
@@ -124,35 +130,37 @@ interface On {
 const SESSIONS = "sessions";
 
 /**
- * The documents of every session, as kept, and this session's id: the one Claude Code started the
- * process with, which the waker follows and every call to the plugin's own server names
- * (`SESSION_ARGUMENT`), so the model's calls and the waker's meet in one conversation.
+ * The documents of every session, as kept, and the session the process is in now: the chat
+ * Claude Code runs, which the waker follows and every call to the plugin's own server names
+ * (`SESSION_ARGUMENT`), so the model's calls and the waker's meet in one conversation. A `/clear`
+ * or a `/resume` inside the process moves it to another chat (`switchTo`), by the exact id Claude
+ * Code gives; null between the old chat's end and the new one's start, when no call names one.
  */
 let kept: Kept = {};
 let session: string | null = null;
 /**
- * Whether Claude Code has moved the process to another session (`/clear`, or `/resume` inside
- * it): from then on no call names a session, so the chat goes by its connection, as without the
- * plugin, rather than by a session it left, whose name and threads a later `claude --resume` of
- * that session would then share with it.
+ * The chats this process has left. Right after a `/resume`, `$.session.id()` still gives the chat
+ * it left, until the resumed one's first turn: an id here becomes the chat again only by Claude
+ * Code's start of it (`classic.SessionStart`), never by that read.
  */
-let moved = false;
+const ended = new Set<string>();
 /** Documents named since the waker started, for it to begin waiting in. */
 const named: string[] = [];
-/** The documents the waker waits in now, by id. */
+/** The documents the waker waits in now, by chat and id (`placeOf`). */
 const following = new Set<string>();
-/** The keys of the wakes put into the chat, the newest last (`withHanded`). */
-const handed = new Set<string>();
 /**
- * The keys of the wakes in lines submitted and not yet settled: a busy session's submit settles
- * only once the line has run, and the relay offers it again meanwhile.
+ * Each chat's wakes: the keys put into it, the newest last (`withHanded`), and those in lines
+ * submitted and not yet settled, since a busy session's submit settles only once the line has run,
+ * and the relay offers it again meanwhile. A chat's own, so a wake handed to one is still handed
+ * to another its relay offers it to, as the chat a `/resume` returns to.
  */
-const pending = new Map<string, number>();
+const marks = new Map<string, { handed: Set<string>; pending: Map<string, number> }>();
 /** Wakes the waker when a document is named. */
 let rouse: (() => void) | null = null;
 /**
- * Ends the pause of a document's waker that heard the person's flag is off, by id: the session's
- * next Artwork call there asks again at once, once the least pause has passed.
+ * Ends the pause of a document's waker that heard the person's flag is off, by chat and id
+ * (`placeOf`): the session's next Artwork call there asks again at once, once the least pause has
+ * passed.
  */
 const resting = new Map<string, () => void>();
 /** How many of the session's Artwork calls named each document, by id, so a pause sees one it missed. */
@@ -223,33 +231,120 @@ function sawTools($: Host, names: readonly string[]): void {
   }
 }
 
-/**
- * The session an Artwork call `tool` names (`namesSession`), or null for none: a call to the
- * plugin's own server, once known, else to the one Claude Code runs for the plugin
- * (`PLUGIN_SERVER`).
- */
-async function namingFor($: Host, tool: string): Promise<string | null> {
+/** Whether an Artwork call `tool` names its chat (`namesSession`): a call to the plugin's own server, once known, else to the one Claude Code runs for the plugin (`PLUGIN_SERVER`). */
+async function namesHere($: Host, tool: string): Promise<boolean> {
   const now = await $.clock.now().catch(() => Date.now());
-  if (!namesSession(tool, ownKnown ? own : PLUGIN_SERVER, now, sessionlessUntil)) return null;
-  return (await namesStarted($)) ? session : null;
+  return namesSession(tool, ownKnown ? own : PLUGIN_SERVER, now, sessionlessUntil);
 }
 
-/** Whether calls may still name `session`: Claude Code hasn't moved the process off it (`moved`). */
-async function namesStarted($: Host): Promise<boolean> {
-  if (session === null || moved) return false;
-  const now = await $.session.id().catch(() => session);
-  if (now !== session) moved = true;
-  return !moved;
+/**
+ * The chat the process is in now. Claude Code's start of a chat moves it (`classic.SessionStart`);
+ * `$.session.id()` does too, for a host that doesn't raise that, but never back to a chat this
+ * process left, which that read still gives for a moment after a `/resume`.
+ */
+async function current($: Host): Promise<string | null> {
+  const id = await $.session.id().catch(() => null);
+  if (started && id !== null && id !== session && !ended.has(id)) switchTo($, id);
+  return session;
 }
 
-/** Has the waker wait in `document`, unless it waits there already. */
+/**
+ * Moves the process to chat `id`, which Claude Code started (`/clear`, or `/resume` inside it): the
+ * chat it was in is left, and the waker takes up the documents `id` keeps, read again from the
+ * store, where a `claude --resume` in another process may have kept them since.
+ */
+function switchTo($: Host, id: string): void {
+  if (id === session) return;
+  if (session !== null) ended.add(session);
+  ended.delete(id);
+  session = id;
+  if (logPath) void $.fs.write(logPath, logLine("chat-switched")).catch(() => undefined);
+  void (async () => {
+    const stored = keptOf(await $.store.get(SESSIONS).catch(() => undefined));
+    kept = mergedKept(stored, kept);
+    if (session !== id) return;
+    if (others.length > 0) return;
+    named.push(...(kept[id]?.documents ?? []));
+    rouse?.();
+  })();
+}
+
+/**
+ * Adds `document` to `chat`'s documents over what the store holds now, so another process's since
+ * stay, and keeps them; a store that refuses keeps nothing for a resume, and this process still wakes.
+ */
+async function save($: Host, chat: string, document: string): Promise<void> {
+  const stored = keptOf(await $.store.get(SESSIONS).catch(() => undefined));
+  kept = withDocument(mergedKept(stored, kept), chat, document, Date.now());
+  await $.store.set(SESSIONS, kept).catch(() => undefined);
+}
+
+/** Where the waker of chat `chat` waits in a document, by its id: its key in `following` and `resting`. */
+function placeOf(chat: string, document: string): string {
+  return `${chat}\n${idOf(document)}`;
+}
+
+/** Chat `chat`'s wakes, handed and pending. */
+function marksOf(chat: string): { handed: Set<string>; pending: Map<string, number> } {
+  let mine = marks.get(chat);
+  if (!mine) {
+    mine = { handed: new Set(), pending: new Map() };
+    marks.set(chat, mine);
+  }
+  return mine;
+}
+
+/**
+ * Hands `wake`'s line to `chat`: a turn of its own, now or once the running turn ends. Its
+ * keys not yet handed are pending from the moment it is submitted, since a busy session's
+ * submit settles only once the line has run, and the relay offers it again meanwhile; taken,
+ * they count as handed; refused, this line lets go of them, and a key no other unsettled line
+ * holds comes again at the relay's next offer, while keys already handed stay handed. Once the
+ * process has left `chat`, it hands nothing: the wake stays unread for that chat's resume.
+ */
+async function hand($: Host, chat: string, wake: Wake): Promise<void> {
+  const { handed, pending } = marksOf(chat);
+  if (alreadyHanded(wake, handed, pending)) {
+    if (logPath) await $.fs.write(logPath, logLine("hand-again")).catch(() => undefined);
+    return;
+  }
+  // Each unsettled line holds its keys, so one settling frees none another still carries.
+  const mine = wake.keys.filter((key) => !handed.has(key));
+  for (const key of mine) pending.set(key, (pending.get(key) ?? 0) + 1);
+  if (logPath)
+    await $.fs
+      .write(logPath, logLine("hand", `${wake.line.length} characters`))
+      .catch(() => undefined);
+  // Checked with nothing between it and the submit, so a switch during the write hands nothing.
+  const taken =
+    session === chat
+      ? await $.prompt.submit({ text: wake.line, asUser: true }).catch((error) => ({
+          deny: String(error),
+        }))
+      : { drop: "left" };
+  for (const key of mine) {
+    const left = (pending.get(key) ?? 1) - 1;
+    if (left > 0) pending.set(key, left);
+    else pending.delete(key);
+  }
+  const refused = taken as { deny?: string; drop?: string } | undefined;
+  if (refused?.deny || refused?.drop) {
+    if (logPath) await $.fs.write(logPath, logLine("hand-refused")).catch(() => undefined);
+    return;
+  }
+  withHanded(handed, wake.keys);
+  if (logPath) await $.fs.write(logPath, logLine("handed")).catch(() => undefined);
+}
+
+/** Has the waker wait in `document` for the chat now, unless it waits there already. */
 function follow(document: string): void {
   // Standing aside, the waker takes the session's kept documents up again when it may.
-  if (others.length > 0) return;
+  if (others.length > 0 || session === null) return;
   const id = idOf(document);
   calls.set(id, (calls.get(id) ?? 0) + 1);
-  if (following.has(id)) {
-    resting.get(id)?.();
+  const place = placeOf(session, document);
+  if (following.has(place)) {
+    resting.get(place)?.();
     return;
   }
   named.push(document);
@@ -263,6 +358,29 @@ function logLine(event: string, detail = ""): string {
   return `${logged.join("\n")}\n`;
 }
 
+/** Follows Claude Code from chat to chat in the process: `/clear` and `/resume` inside it. */
+function followChats(on: On): void {
+  // A `/clear` or `/resume` inside the process ends the chat it was in, then starts the next.
+  // Between the two, no call names a chat and no line is handed to one, unless Claude Code's id
+  // already gives a chat the process hasn't left, as right after a `/clear` (`current`).
+  on("session.end", async (_$, e, next) => {
+    if ((e.reason === "clear" || e.reason === "resume") && e.sessionId) {
+      ended.add(e.sessionId);
+      if (session === e.sessionId) session = null;
+    }
+    return next(e);
+  });
+
+  // The chat Claude Code starts in the process, by its exact id: the process's first start is
+  // `session.start`'s; any later one, a `/clear`'s or a `/resume`'s, moves the process there.
+  on("classic.SessionStart", async ($, e, next) => {
+    if (started && typeof e.session_id === "string" && e.session_id !== "") {
+      switchTo($, e.session_id);
+    }
+    return next(e);
+  });
+}
+
 export function register(on: On): void {
   on("session.start", async ($, e, next) => {
     const result = await next(e);
@@ -270,7 +388,7 @@ export function register(on: On): void {
     started = true;
     logPath = await $.env.get("ARTWORK_PLUGIN_LOG");
     session = await $.session.id();
-    kept = keptOf(await $.store.get(SESSIONS));
+    kept = keptOf(await $.store.get(SESSIONS).catch(() => undefined));
     let server: string | null = null;
     // Read once: the manifest changes only with an update, which loads the module again. Any
     // failure, a host without `$.plugin` included, names no version and still wakes.
@@ -283,94 +401,61 @@ export function register(on: On): void {
     // was updated meanwhile.
     let unversionedUntil = 0;
     // Named on each relay call, so the server can answer this plugin by its version.
-    const relayArgs = (document: string, now: number, naming: boolean) => ({
+    const relayArgs = (document: string, now: number, chat: string) => ({
       document,
       timeout_seconds: HOLD_SECONDS,
       ...(version === undefined || now < unversionedUntil ? {} : { plugin_version: version }),
-      ...(!naming || session === null || now < sessionlessUntil
-        ? {}
-        : { [SESSION_ARGUMENT]: sessionArgumentOf(session) }),
+      ...(now < sessionlessUntil ? {} : { [SESSION_ARGUMENT]: sessionArgumentOf(chat) }),
     });
 
     /**
-     * Hands `wake`'s line to the session: a turn of its own, now or once the running turn ends.
-     * Its keys not yet handed are pending from the moment it is submitted, since a busy session's
-     * submit settles only once the line has run, and the relay offers it again meanwhile; taken,
-     * they count as handed; refused, this line lets go of them, and a key no other unsettled line
-     * holds comes again at the relay's next offer, while keys already handed stay handed.
+     * Waits in `document` for `chat` while the process is in that chat and it stays one of the
+     * chat's documents, handing each line over. Once the process leaves the chat, its call running
+     * then runs out, naming it, and hands nothing; the new chat's own waker waits beside it.
      */
-    const hand = async (wake: Wake): Promise<void> => {
-      if (alreadyHanded(wake, handed, pending)) {
-        if (logPath) await $.fs.write(logPath, logLine("hand-again")).catch(() => undefined);
-        return;
-      }
-      // Each unsettled line holds its keys, so one settling frees none another still carries.
-      const mine = wake.keys.filter((key) => !handed.has(key));
-      for (const key of mine) pending.set(key, (pending.get(key) ?? 0) + 1);
-      if (logPath)
-        await $.fs
-          .write(logPath, logLine("hand", `${wake.line.length} characters`))
-          .catch(() => undefined);
-      const taken = await $.prompt.submit({ text: wake.line, asUser: true }).catch((error) => ({
-        deny: String(error),
-      }));
-      for (const key of mine) {
-        const left = (pending.get(key) ?? 1) - 1;
-        if (left > 0) pending.set(key, left);
-        else pending.delete(key);
-      }
-      const refused = taken as { deny?: string; drop?: string } | undefined;
-      if (refused?.deny || refused?.drop) {
-        if (logPath) await $.fs.write(logPath, logLine("hand-refused")).catch(() => undefined);
-        return;
-      }
-      withHanded(handed, wake.keys);
-      if (logPath) await $.fs.write(logPath, logLine("handed")).catch(() => undefined);
-    };
-
-    /** Waits in `document` while it stays one of the session's, handing each line over. */
-    const followIn = async (via: string, document: string): Promise<void> => {
+    const followIn = async (via: string, document: string, chat: string): Promise<void> => {
       let failures = 0;
       const id = idOf(document);
-      while (isKept(kept, session, document) && others.length === 0) {
+      const place = placeOf(chat, document);
+      while (session === chat && isKept(kept, chat, document) && others.length === 0) {
         // The session's calls here so far, so a pause sees one made while this call ran.
         const called = calls.get(id) ?? 0;
         if (logPath) await $.fs.write(logPath, logLine("relay-call")).catch(() => undefined);
-        const naming = await namesStarted($);
         // Read after the write, so an hour that ran out meanwhile names the version again.
         const now = await $.clock.now().catch(() => Date.now());
-        // A second server may have shown up during the write: checked again with nothing between.
-        if (others.length > 0) break;
+        // Checked again with nothing between: a second server, or a switch, during the writes.
+        const here = await current($);
+        if (others.length > 0 || here !== chat) break;
         // Built here, so a refusal another document's call met during the write counts.
-        const args = relayArgs(document, now, naming);
+        const args = relayArgs(document, now, chat);
         relaying += 1;
-        const place = relayIn.get(idOf(document)) ?? { running: 0, ended: 0 };
-        relayIn.set(idOf(document), place);
-        place.running += 1;
+        const relay = relayIn.get(id) ?? { running: 0, ended: 0 };
+        relayIn.set(id, relay);
+        relay.running += 1;
         const answer = await $.mcp
           .call(via, RELAY_TOOL, args)
           .catch((error: unknown) => ({ isError: true, failed: error }) as const);
         // When it ended, on the clock the hold waits by, before it counts as ended.
-        place.ended = await $.clock.now().catch(() => Date.now());
-        place.running -= 1;
+        relay.ended = await $.clock.now().catch(() => Date.now());
+        relay.running -= 1;
         relaying -= 1;
         // Ended and past its window, a document's entry goes, so the map holds only live ones.
         for (const [id, one] of relayIn) {
-          if (one.running === 0 && place.ended - one.ended > RELAY_LEFT_MS) relayIn.delete(id);
+          if (one.running === 0 && relay.ended - one.ended > RELAY_LEFT_MS) relayIn.delete(id);
         }
         if (answer.isError) {
           const why = "failed" in answer ? String(answer.failed) : JSON.stringify(answer.content);
           // COMPAT(sessionless-server): added in 2026-11-22, remove after 2027-01-31. A server that
           // doesn't take the session is asked again at once without it.
           if (sessionUnknown(why)) {
-            sessionlessUntil = place.ended + SESSION_AGAIN_MS;
+            sessionlessUntil = relay.ended + SESSION_AGAIN_MS;
             continue;
           }
           // COMPAT(relay-unversioned-server): added in 2026-11-19, remove after 2027-01-31. A server
           // that doesn't take the version is asked again at once without it, as is a call that
           // went out with it before another document's refusal.
           if (versionUnknown(why)) {
-            unversionedUntil = place.ended + VERSION_AGAIN_MS;
+            unversionedUntil = relay.ended + VERSION_AGAIN_MS;
             if (logPath)
               await $.fs.write(logPath, logLine("relay-unversioned")).catch(() => undefined);
             continue;
@@ -388,9 +473,9 @@ export function register(on: On): void {
             failures = 0;
             await $.clock.sleep(OFF_LEAST_MS);
             if ((calls.get(id) ?? 0) !== called) continue;
-            const woken = new Promise<void>((resolve) => resting.set(id, resolve));
+            const woken = new Promise<void>((resolve) => resting.set(place, resolve));
             await Promise.race([$.clock.sleep(OFF_PAUSE_MS - OFF_LEAST_MS), woken]);
-            resting.delete(id);
+            resting.delete(place);
             continue;
           }
           failures += 1;
@@ -398,17 +483,17 @@ export function register(on: On): void {
           continue;
         }
         failures = 0;
-        // A call that named the session, answered once the process has left it, hands nothing to
-        // the chat that replaced it: a comment's wake stays unread for that session's next resume,
-        // while a decision's answer, recorded with this answer, waits only in its desk, an hour.
-        if (naming && !(await namesStarted($))) continue;
+        // A call answered once the process has left its chat hands nothing to the chat that
+        // replaced it: a comment's wake stays unread for that chat's next resume, while a
+        // decision's answer, recorded with this answer, waits only in its desk, an hour.
+        if ((await current($)) !== chat) break;
         const wakes = wakesOf(answer);
         if (logPath)
           await $.fs
             .write(logPath, logLine("relay-answer", String(wakes.length)))
             .catch(() => undefined);
         // Handed in the order they came, each without waiting for the one before to run.
-        for (const wake of wakes) void hand(wake);
+        for (const wake of wakes) void hand($, chat, wake);
       }
     };
 
@@ -447,13 +532,14 @@ export function register(on: On): void {
             sawTools($, listedTools);
           }
         }
-        if (server !== null && others.length === 0) {
+        if (server !== null && others.length === 0 && session !== null) {
           const via = server;
+          const chat = session;
           for (const document of named.splice(0)) {
-            const id = idOf(document);
-            if (following.has(id)) continue;
-            following.add(id);
-            void followIn(via, document).finally(() => following.delete(id));
+            const place = placeOf(chat, document);
+            if (following.has(place)) continue;
+            following.add(place);
+            void followIn(via, document, chat).finally(() => following.delete(place));
           }
         }
         await new Promise<void>((resolve) => {
@@ -488,9 +574,10 @@ export function register(on: On): void {
       if (held <= 0) break;
       await $.clock.sleep(held);
     }
-    // Each call to the plugin's own server names the session (`SESSION_ARGUMENT`), so a new
-    // connection of it, after `/mcp` or a resume, keeps its name and threads.
-    const naming = artworkToolOf(e.tool) === null ? null : await namingFor($, e.tool);
+    // Each call to the plugin's own server names the chat it runs in (`SESSION_ARGUMENT`), so a
+    // new connection of it, after `/mcp` or a resume, keeps its name and threads.
+    const chat = artworkToolOf(e.tool) === null ? null : await current($);
+    const naming = chat !== null && (await namesHere($, e.tool)) ? chat : null;
     let result = await next(
       naming === null ? e : { ...e, [SESSION_ARGUMENT]: sessionArgumentOf(naming) },
     );
@@ -506,15 +593,15 @@ export function register(on: On): void {
     }
     const document = documentOfCall(e.tool, e, result.text ?? "");
     if (logPath) await $.fs.write(logPath, logLine("artwork-call", e.tool)).catch(() => undefined);
-    if (document === null || session === null) return result;
-    kept = withDocument(kept, session, document, Date.now());
-    // A store that refuses keeps nothing for a resume; this session still wakes. Once the process
-    // has left the session it started as (`moved`), its documents are kept for this process alone,
-    // so a later resume of that session never wakes in a chat's it didn't work in.
-    if (await namesStarted($)) await $.store.set(SESSIONS, kept).catch(() => undefined);
-    follow(document);
+    if (document === null || chat === null) return result;
+    // Kept for the chat the call ran in, even one the process left while it ran, so the document
+    // wakes that chat's resume and never the chat that replaced it.
+    await save($, chat, document);
+    if (chat === session) follow(document);
     return result;
   });
+
+  followChats(on);
 
   // Claude Code's notice of a relay call of the waker's that failed starts no turn: the waker asks
   // again by itself, and the model has nothing to do about it.
@@ -532,7 +619,15 @@ export function register(on: On): void {
     return { decision: "deny", reason };
   });
 
+  // A turn of the main loop runs in the chat `$.session.id()` gives then, for a host that ends a
+  // chat but raises no start of the next.
   on("turn.start", async ($, e, next) => {
+    if (!e.agentId && started) {
+      // A chat this process left only while it is in none: a `/resume`'s first turn may still read
+      // the chat it left, which must never take the resumed chat's place.
+      const id = await $.session.id().catch(() => null);
+      if (id !== null && (session === null || !ended.has(id))) switchTo($, id);
+    }
     if (logPath && !e.agentId)
       await $.fs.write(logPath, logLine("turn-start")).catch(() => undefined);
     return next(e);

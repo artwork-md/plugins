@@ -323,6 +323,21 @@ export function withDocument(kept: Kept, session: string, document: string, now:
   return Object.fromEntries(sessions.slice(0, MOST_SESSIONS));
 }
 
+/**
+ * What the store holds, `stored`, with this process's `mine` laid over it: each session as whichever
+ * of the two saw it last, past `MOST_SESSIONS` the one seen longest ago going. Another process may
+ * have kept a session's documents since this one read the store, as a `claude --resume` of a chat
+ * this process later resumes too.
+ */
+export function mergedKept(stored: Kept, mine: Kept): Kept {
+  const next: Kept = { ...stored };
+  for (const [session, entry] of Object.entries(mine)) {
+    if ((next[session]?.at ?? -Infinity) <= entry.at) next[session] = entry;
+  }
+  const sessions = Object.entries(next).sort(([, a], [, b]) => b.at - a.at);
+  return Object.fromEntries(sessions.slice(0, MOST_SESSIONS));
+}
+
 /** Whether `document`, in any spelling, is still one of `session`'s kept documents. */
 export function isKept(kept: Kept, session: string | null, document: string): boolean {
   if (session === null) return false;
