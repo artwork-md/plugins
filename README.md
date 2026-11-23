@@ -55,8 +55,9 @@ The Codex plugin brings the wake-ups only, so add Artwork's tools first:
 
 ```
 codex mcp add artwork --url https://artwork.md/mcp
-codex mcp login artwork
 ```
+
+Sign in on the page it opens or the address it prints, or run `codex mcp login artwork` if it says to.
 
 Then install the plugin:
 
