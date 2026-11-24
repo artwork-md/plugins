@@ -53,7 +53,7 @@ function bigLength(length) {
 export function readFrames(buffer) {
   const frames = [];
   let at = 0;
-  for (;;) {
+  while (true) {
     if (buffer.length - at < 2) break;
     const first = buffer[at] ?? 0;
     const second = buffer[at + 1] ?? 0;

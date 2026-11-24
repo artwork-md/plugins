@@ -91,9 +91,7 @@ const pluginVersion = (() => {
     );
     const version = JSON.parse(readFileSync(manifest, "utf8")).version;
     return typeof version === "string" ? version : undefined;
-  } catch {
-    return undefined;
-  }
+  } catch {}
 })();
 
 /** @param {string} step @param {string} [detail] */
@@ -455,7 +453,7 @@ async function main() {
   let failures = 0;
   let idleSince = Date.now();
   let superseded = false;
-  for (;;) {
+  while (true) {
     if (!ownsControl()) {
       superseded = true;
       log("superseded");

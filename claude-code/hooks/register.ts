@@ -516,7 +516,7 @@ export function register(on: On): void {
         const listed = namesIn(await $.tool.list().catch(() => []));
         sawTools($, listed.length > 0 ? listed : listedTools);
       }
-      for (;;) {
+      while (true) {
         if (server === null && named.length > 0) {
           const connected = await $.mcp
             .connect("artwork")
@@ -564,7 +564,7 @@ export function register(on: On): void {
     // Checked again after each pause: a relay call may still run, or one may end meanwhile.
     // A wait that names no document waits for every document's relay.
     const named = documentOfCall(e.tool, e, "");
-    for (;;) {
+    while (true) {
       if (e.tool !== `mcp__${own}__artwork_wait` || others.length === 0) break;
       const now = await $.clock.now().catch(() => Date.now());
       const places = named === null ? [...relayIn.values()] : [relayIn.get(idOf(named))];

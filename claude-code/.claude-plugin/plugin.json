@@ -1,6 +1,6 @@
 {
   "name": "artwork",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Artwork's tools for Claude Code. While your Claude Code session is running, a comment for your agent in an Artwork document starts its reply without you sending a message.",
   "author": { "name": "Artwork", "url": "https://artwork.md" },
   "homepage": "https://artwork.md",
