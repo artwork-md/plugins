@@ -158,7 +158,7 @@ const marks = new Map<string, { handed: Set<string>; pending: Map<string, number
 /** Wakes the waker when a document is named. */
 let rouse: (() => void) | null = null;
 /**
- * Ends the pause of a document's waker that heard the person's flag is off, by chat and id
+ * Ends the pause of a document's waker that heard the relay isn't offered, by chat and id
  * (`placeOf`): the session's next Artwork call there asks again at once, once the least pause has
  * passed.
  */
@@ -466,7 +466,7 @@ export function register(on: On): void {
           if (logPath)
             await $.fs.write(logPath, logLine(off ? "relay-off" : step)).catch(() => undefined);
           if (refused) return;
-          // The flag off, or the relay unlisted while it is, it asks again after a pause; once the
+          // The relay not offered now, as by an older server, it asks again after a pause; once the
           // least has passed, at once if the session called here since this call began, or at its
           // next call here.
           if (off) {

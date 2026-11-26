@@ -258,19 +258,20 @@ export function pauseAfter(failures) {
 
 /**
  * How long to wait before asking again after a call said the relay isn't offered to this thread,
- * as while the person's `codex-wake` flag is off: Codex lists a server's tools again when the
- * server says they changed, which artwork.md does within a minute or two of the flag turning on.
+ * as by a server too old to offer it to Codex, or one that still gates it on a flag: the next ask
+ * finds it once the thread's server offers it.
  */
 export const OFF_PAUSE_MS = 120_000;
 
 /**
- * Whether a failed call says the relay isn't offered here: the server refused it for the flag,
- * or Codex has no such tool on that server, as while the flag is off. The waker asks again after
- * `OFF_PAUSE_MS`.
+ * Whether a failed call says the relay isn't offered here: Codex has no such tool on that server,
+ * or the server answered that it is disabled, as an older server's refusal for the person's
+ * `codex-wake` flag says too ("artwork_relay is disabled: …"), from before the relay was offered
+ * to every Codex thread (ART-3520). The waker asks again after `OFF_PAUSE_MS`.
  * @param {unknown} error
  */
 export function relayOff(error) {
-  return /flag is off|unknown tool|tool[^\n]*not found|not found[^\n]*tool|no such tool|disabled/i.test(
+  return /unknown tool|tool[^\n]*not found|not found[^\n]*tool|no such tool|disabled/i.test(
     String(error),
   );
 }

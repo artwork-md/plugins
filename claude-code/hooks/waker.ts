@@ -218,31 +218,34 @@ export function withHanded(handed: Set<string>, keys: readonly string[]): Set<st
 }
 
 /**
- * How long to wait before asking again after a call said the person's `wake-relay` flag is off
- * (`relayOff`), so turning it on reaches the session with no reconnect: two minutes, or sooner,
- * once `OFF_LEAST_MS` has passed, at the session's next Artwork call in the document.
+ * How long to wait before asking again after a call said the session's server doesn't offer the
+ * relay now (`relayOff`), so a server that offers it later reaches the session with no reconnect:
+ * two minutes, or sooner, once `OFF_LEAST_MS` has passed, at the session's next Artwork call in
+ * the document.
  */
 export const OFF_PAUSE_MS = 120_000;
 
 /**
- * The least a waker waits after hearing the flag is off: as long as artwork.md keeps a grant's
- * flag, so a call asked sooner would only be refused again.
+ * The least a waker waits after hearing the relay isn't offered: a minute, so a call asked sooner
+ * would only be refused again.
  */
 export const OFF_LEAST_MS = 60_000;
 
 /**
- * Whether a failed call says the person's `wake-relay` flag is off, since the server lists
- * `artwork_relay` only while it is on: the server refused it, or answered that the tool is
- * disabled, as it does before Claude Code lists its tools again, or Claude Code has no such tool
- * to call. Turned on, the server tells Claude Code its tools changed
- * and Claude Code lists them again, so the waker's next ask finds it: on artwork.md idle session
- * or not, and on a local server once a session's Artwork call has had it read the flag again.
+ * Whether a failed call says the session's server doesn't offer `artwork_relay` now: it answered
+ * that the tool is disabled, as artwork.md does to a call on MCP's 2026-07-28 that names no chat,
+ * or Claude Code has no such tool to call, as from a server too old to offer it; or an older
+ * server refused it for the person's flag, as servers did before the relay was offered to every
+ * Claude Code session (ART-3520). The waker asks again later rather than stopping.
  */
 export function relayOff(error: unknown): boolean {
-  return new RegExp(
-    `wake-relay flag is off|Tool ${RELAY_TOOL} disabled|no connected MCP tool "${RELAY_TOOL}"`,
-    "i",
-  ).test(String(error));
+  const said = String(error).toLowerCase();
+  return [
+    `Tool ${RELAY_TOOL} disabled`,
+    `no connected MCP tool "${RELAY_TOOL}"`,
+    // COMPAT(wake-relay-refusal): added in 2026-11-24, remove after 2027-02-28
+    "wake-relay flag is off",
+  ].some((sign) => said.includes(sign.toLowerCase()));
 }
 
 /** How Claude Code's notice of an MCP task opens, naming the task, and its server and tool. */
@@ -277,7 +280,7 @@ export function pauseAfter(failures: number): number {
 
 /**
  * Whether a failed call says the waker can't wait in this document: the session's Artwork server
- * doesn't offer `artwork_relay` (one it doesn't list, as while the flag is off, is `relayOff`), the
+ * doesn't offer `artwork_relay` (one it doesn't list now is `relayOff`), the
  * session isn't signed in there or its grant was revoked, the document is on another server, or the person can no longer
  * open it. The waker then stops waiting in that document until the session's next Artwork call
  * there; any other failure is asked again.
