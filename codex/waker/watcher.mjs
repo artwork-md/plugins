@@ -151,8 +151,11 @@ function save() {
 
 /**
  * Folds the hooks' notes into the follows, and deletes each note it read once the follows are
- * saved; a `SessionStart` note names no document and only rouses the watcher. Each note is a
- * whole file a hook renamed into place, so one written meanwhile is read at the next round.
+ * saved. A `SessionStart` note names no document: its thread starts or resumes, so the waits the
+ * relay refused there are asked again, as one refused as "thread not found" when Codex closed
+ * the thread, which the person resumed before the watcher's next look at the loaded threads
+ * (ART-4058). Each note is a whole file a hook renamed into place, so one written meanwhile is read
+ * at the next round.
  */
 function absorb() {
   const names = notesIn(data);
@@ -167,6 +170,9 @@ function absorb() {
       ) {
         state.follows = withWorked(state.follows, { thread, server, document, at }, Date.now());
         refused.delete(waitKey({ thread, server, document }));
+      } else if (typeof thread === "string") {
+        for (const [key, wait] of waits) if (threadOfKey(key) === thread) wait.starts += 1;
+        for (const key of refused) if (threadOfKey(key) === thread) refused.delete(key);
       }
     } catch {
       // Unreadable: its thread's next Artwork call notes it again.
@@ -183,7 +189,10 @@ function absorb() {
   }
 }
 
-/** The waits the relay refused, by `waitKey`, until the thread's next Artwork call there. */
+/**
+ * The waits the relay refused, by `waitKey`, until the thread's next Artwork call there, its next
+ * `SessionStart`, or a listing without it.
+ */
 const refused = new Set();
 
 /**
@@ -253,7 +262,15 @@ async function queue(thread, line) {
 /** @type {import("./codex-socket.mjs").CodexConnection | null} */
 let codex = null;
 
-/** The waits running, by `waitKey`. @type {Map<string, { stop: boolean, wake?: () => void }>} */
+/**
+ * One wait running: whether the plan stopped it, what ends its pause, and how many of its thread's
+ * `SessionStart` notes the watcher read while it ran. A refusal answering a call made before the
+ * thread's latest start, as "thread not found" for a call Codex got while the thread was closed,
+ * says nothing of the thread now (ART-4058).
+ * @typedef {{ stop: boolean, wake?: () => void, starts: number }} Wait
+ */
+
+/** The waits running, by `waitKey`. @type {Map<string, Wait>} */
 const waits = new Map();
 
 /**
@@ -261,7 +278,7 @@ const waits = new Map();
  * line the relay answers, until the plan drops the wait or the connection to Codex ends.
  * @param {{ thread: string, server: string, document: string }} where
  * @param {import("./codex-socket.mjs").CodexConnection} connection
- * @param {{ stop: boolean, wake?: () => void }} wait
+ * @param {Wait} wait
  */
 async function waitIn(where, connection, wait) {
   const { thread, server, document } = where;
@@ -272,6 +289,7 @@ async function waitIn(where, connection, wait) {
     let answer;
     /** @type {string | null} */
     let failed = null;
+    const started = wait.starts;
     try {
       answer = await connection.call(
         "mcpServer/tool/call",
@@ -292,11 +310,18 @@ async function waitIn(where, connection, wait) {
     if (codex !== connection) return;
     const isError = /** @type {{ isError?: unknown } | null} */ (answer)?.isError === true;
     if (failed !== null || isError) {
+      // Stopped while its call was out, the wait ends at once rather than pausing on the thread's
+      // key; its end starts a round, which waits there again if the thread is wanted.
+      if (wait.stop) return;
       const why = failed ?? JSON.stringify(/** @type {{ content?: unknown }} */ (answer).content);
       if (relayOff(why)) {
         log("relay-off");
         failures = 0;
         await sleep(OFF_PAUSE_MS, wait);
+        continue;
+      }
+      if (relayRefused(why) && wait.starts !== started) {
+        log("relay-refused-before-start");
         continue;
       }
       if (relayRefused(why)) {
@@ -504,10 +529,13 @@ async function main() {
       for (const where of wanted) {
         const key = waitKey(where);
         if (waits.has(key)) continue;
-        const wait = { stop: false };
+        const wait = { stop: false, starts: 0 };
         waits.set(key, wait);
         void waitIn(where, connection, wait).finally(() => {
           if (waits.get(key) === wait) waits.delete(key);
+          // A wait stopped while its call was out may be wanted again by now, as for a thread
+          // resumed meanwhile, which a round skipped while this one still held its key.
+          if (wait.stop) rouse();
         });
       }
     }

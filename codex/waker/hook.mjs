@@ -6,8 +6,8 @@
  * - `PostToolUse` on an Artwork tool: notes the thread and the document it worked in, for the
  *   watcher to wait in, then makes sure the watcher runs. The first time a thread can't be woken
  *   from here (`cantWake`), it tells the person and the agent why, once.
- * - `SessionStart`: leaves a note with no document, then makes sure the watcher runs, so a
- *   resumed thread wakes from its documents.
+ * - `SessionStart`: leaves a note naming the thread and no document, then makes sure the watcher
+ *   runs, so a resumed thread wakes from its documents.
  * - `PreToolUse` on `artwork_relay`: refuses it to the model, since only the watcher calls it.
  *
  * Codex gives plugin hooks `PLUGIN_DATA`, the plugin's own folder, where the notes go (`notes/`,
@@ -156,18 +156,20 @@ async function ensureWatcher(/** @type {string} */ data) {
 }
 
 /**
- * What `SessionStart` does in `data`: leaves a note with no document, then makes sure a watcher
- * runs (`ensure`), so a watcher that took the rouse while exiting starts again for the note.
+ * What `SessionStart` does in `data` for `thread`: leaves a note naming the thread and no
+ * document, then makes sure a watcher runs (`ensure`), so a watcher that took the rouse while
+ * exiting starts again for the note.
  * @param {string} data
+ * @param {unknown} thread
  * @param {(data: string) => Promise<void>} ensure
  */
-export async function sessionStart(data, ensure = ensureWatcher) {
+export async function sessionStart(data, thread, ensure = ensureWatcher) {
   // Only once a thread has used Artwork here: a Codex home that never did starts nothing.
   if (!existsSync(join(data, "state.json")) && notesIn(data).length === 0) return;
   // No watcher runs on an older Node to read the note.
   if (!nodeRuns()) return;
   try {
-    leaveNote(data, { at: Date.now() });
+    leaveNote(data, typeof thread === "string" ? { at: Date.now(), thread } : { at: Date.now() });
   } catch {
     // A notes folder no hook can write keeps every call from being noted; the rouse still
     // reaches a watcher that isn't exiting.
@@ -368,7 +370,7 @@ async function main() {
       return;
     }
     case "SessionStart":
-      await sessionStart(data);
+      await sessionStart(data, event.session_id);
       return;
     default:
       return;

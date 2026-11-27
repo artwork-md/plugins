@@ -280,7 +280,8 @@ export function relayOff(error) {
  * Whether a failed call says the waker can't wait in this document from this thread: the thread
  * isn't signed in to the server or its grant was revoked, the document is on another server, the
  * person can no longer open it, or the thread or its server is gone from Codex. The waker stops
- * waiting there until the thread's next Artwork call there; any other failure is asked again.
+ * waiting there until the thread's next Artwork call there, its next `SessionStart` or a listing
+ * without it; any other failure is asked again.
  * @param {unknown} error
  */
 export function relayRefused(error) {
