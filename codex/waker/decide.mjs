@@ -296,6 +296,7 @@ export function relayRefused(error) {
  * @param {unknown} tool
  */
 export function refusal(tool) {
+  // hook.sh refuses it in the same words where no Node runs the hooks.
   return artworkToolOf(tool)?.tool === RELAY_TOOL
     ? "Artwork's plugin calls artwork_relay itself. Listen with artwork_wait."
     : null;

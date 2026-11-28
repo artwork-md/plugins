@@ -9,6 +9,10 @@
  * - `SessionStart`: leaves a note naming the thread and no document, then makes sure the watcher
  *   runs, so a resumed thread wakes from its documents.
  * - `PreToolUse` on `artwork_relay`: refuses it to the model, since only the watcher calls it.
+ * - `PreToolUse` on `artwork_wait`: notes the thread and the document before the wait holds, so
+ *   the watcher's relay is there before a comment is (`beforeWait`).
+ *
+ * `hook.sh` runs it, on a Node it finds (hooks.json).
  *
  * Codex gives plugin hooks `PLUGIN_DATA`, the plugin's own folder, where the notes go (`notes/`,
  * a file per call, written whole and renamed into place, so the watcher never reads half a note
@@ -257,6 +261,7 @@ export async function cantWake(thread, home, source, node = process.versions.nod
  * @param {string} why
  */
 export function cantWakeOutput(why) {
+  // hook.sh says the same, word for word, where no Node runs this file.
   return {
     systemMessage: `Artwork can't start this thread when someone comments: ${why}. The agent sees comments only while it waits in the document.`,
     hookSpecificOutput: {
@@ -300,6 +305,36 @@ export function claimTelling(told) {
   }
 }
 
+/**
+ * What `PreToolUse` does in `data` before the model's `artwork_wait`: notes its thread and document
+ * and makes sure the watcher runs, as `PostToolUse` would only once the wait returned (ART-4255).
+ * The wait holds until a comment comes, so a thread whose first call in a document is a wait would
+ * otherwise have the comment handed to that wait, which a turn ended on a chat answer leaves
+ * unread. Noted first, the watcher's relay call takes the document over from the wait, which the
+ * server then answers that the plugin wakes the thread (`relay-desk.ts`), and the comment goes to
+ * the relay instead. It prints nothing.
+ * @param {string} data
+ * @param {{ session_id?: unknown, tool_name?: unknown, tool_input?: unknown }} event
+ */
+async function beforeWait(data, event) {
+  const named = artworkToolOf(event.tool_name);
+  const thread = event.session_id;
+  if (named?.tool !== "artwork_wait" || typeof thread !== "string") return;
+  // A one-shot check (`timeout_seconds: 0`) holds nothing and must still read what waits: a relay
+  // there first would answer it that the plugin wakes the thread instead.
+  const input = /** @type {{ timeout_seconds?: unknown } | null | undefined} */ (event.tool_input);
+  if (input?.timeout_seconds === 0) return;
+  const document = documentOfCall(named.tool, event.tool_input, undefined);
+  if (document === null) return;
+  try {
+    leaveNote(data, { thread, server: named.server, document, at: Date.now() });
+  } catch {
+    // A notes folder no hook can write: the wait goes ahead, and `PostToolUse` tries again.
+    return;
+  }
+  await ensureWatcher(data);
+}
+
 /** Reads the hook's input, as Codex writes it to stdin. */
 async function input() {
   const chunks = [];
@@ -323,7 +358,9 @@ async function main() {
             },
           }),
         );
+        return;
       }
+      await beforeWait(data, event);
       return;
     }
     case "PostToolUse": {
